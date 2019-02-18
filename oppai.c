@@ -1947,30 +1947,51 @@ int d_update_max_strains(diff_calc_t* d, float decay_factor,
   return 0;
 }
 
+
+/* Repeating any section adds this many stars to its rating */
+#define STAR_BONUS_PER_LENGTH_DOUBLE 0.2
+
+/* Constant difficulty sections of this length match previous star rating */
+#define STAR_BONUS_BASE_TIME (20.0 * 1000.0)
+
+/* probability formula assumes zero skill is at -infinity not zero, so stretch out range between 0 and STAR_EASY_ZONE */
+#define STAR_EASY_ZONE 2.0
+double stars_to_difficulty(double val) {
+	if (val >= STAR_EASY_ZONE) return val;
+	else if (val > 0) return  STAR_EASY_ZONE * (log(val / STAR_EASY_ZONE) + 1);
+	return -1e10;
+}
+
+double difficulty_to_stars(double val) {
+	return (val >= STAR_EASY_ZONE) ? val : exp(val / STAR_EASY_ZONE - 1) * STAR_EASY_ZONE;	
+}
+
 void d_weigh_strains2(diff_calc_t* d, float* pdiff, float* ptotal) {
   int i;
-  int nstrains = 0;
-  float* strains;
-  float total = 0;
-  float difficulty = 0;
-  float weight = 1.0f;
+  int nstrains = d->highest_strains.len;
+  float* strains = (float*)d->highest_strains.data;
 
-  strains = (float*)d->highest_strains.data;
-  nstrains = d->highest_strains.len;
+  /* note: using double here because we're adding up e^x, which can get big and maybe overflow float */
 
-  /* sort strains from highest to lowest */
-  qsort(strains, nstrains, sizeof(float), dbl_desc);
+  /* constant in probability distribution */
+  double k = log(2) / STAR_BONUS_PER_LENGTH_DOUBLE;
+  /* 
+  * previous weigh_strains returned sum of DECAY_WEIGHT^n * strain,
+  * sum of DECAY_WEIGHT^n quickly converges to 1 / ( 1 - DECAY_WEIGHT )
+  */
+  double legacy_scaling_factor = 1 / (1 - DECAY_WEIGHT); 
 
+  double difficulty = 0;
+
+  /* calculate difficulty, i.e. probability distribution of FC */
   for (i = 0; i < nstrains; ++i) {
-    total += (float)pow(strains[i], 1.2);
-    difficulty += strains[i] * weight;
-    weight *= DECAY_WEIGHT;
+    double stars = sqrt(strains[i]*legacy_scaling_factor) * STAR_SCALING_FACTOR;
+    difficulty += exp(k * stars_to_difficulty(stars)) * STRAIN_STEP/STAR_BONUS_BASE_TIME;
   }
 
-  *pdiff = difficulty;
-  if (ptotal) {
-    *ptotal = total;
-  }
+  difficulty = log(difficulty) / k;
+
+  *pdiff = difficulty_to_stars(difficulty);
 }
 
 float d_weigh_strains(diff_calc_t* d) {
@@ -2102,11 +2123,6 @@ int d_std(diff_calc_t* d, int mods) {
   if (res < 0) {
     return res;
   }
-
-  d->aim_length_bonus = d_length_bonus(d->aim, d->aim_difficulty);
-  d->speed_length_bonus = d_length_bonus(d->speed, d->speed_difficulty);
-  d->aim = (float)sqrt(d->aim) * STAR_SCALING_FACTOR;
-  d->speed = (float)sqrt(d->speed) * STAR_SCALING_FACTOR;
 
   if (mods & MODS_TOUCH_DEVICE) {
     d->aim = (float)pow(d->aim, 0.8f);
@@ -2527,11 +2543,7 @@ int ppv2x(pp_calc_t* pp, float aim, float speed, float base_ar,
 
   /* various pp calc multipliers */
   float nobjects_over_2k = nobjects / 2000.0f;
-  float length_bonus = (
-    0.95f +
-    0.4f * mymin(1.0f, nobjects_over_2k) +
-    (nobjects > 2000 ? (float)log10(nobjects_over_2k) * 0.5f : 0.0f)
-  );
+  float length_bonus = 1;
   float miss_penality = (float)pow(0.97f, nmiss);
   float combo_break = (
     (float)pow(combo, 0.8f) / (float)pow(max_combo, 0.8f)
